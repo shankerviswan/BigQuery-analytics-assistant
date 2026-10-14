@@ -1,7 +1,9 @@
+from datetime import date
+
 from app.assistant import AnalyticsAssistant
 from app.llm import SQLProposal
 from app.date_context import DateContext
-from datetime import date
+from app.metric_check import check_metric_alignment
 
 
 class FakeSettings:
@@ -14,7 +16,7 @@ class FakeSettings:
     llm_base_url = None
     llm_api_key = None
     llm_model = None
-    live_schema = False  # force static schema in unit tests
+    live_schema = False
 
 
 class FakeProvider:
@@ -29,15 +31,20 @@ class FakeExecutor:
     def __init__(self, result):
         self.result = result
         self.called = False
-        self.client = None  # schema path not used when live_schema=False
+        self.client = None
 
     def execute(self, sql, parameters, allowed_tables):
         self.called = True
+        self.last_params = parameters
         return self.result
 
 
 def _date_ctx():
-    return DateContext(timezone="UTC", today=date(2026, 10, 14), now_iso="2026-10-14T12:00:00+00:00")
+    return DateContext(
+        timezone="UTC",
+        today=date(2026, 10, 14),
+        now_iso="2026-10-14T12:00:00+00:00",
+    )
 
 
 def test_ambiguous_sales_asks_before_execution():
@@ -48,6 +55,21 @@ def test_ambiguous_sales_asks_before_execution():
     )
     result = assistant.ask("What were sales?")
     assert result["status"] == "clarification_required"
+    assert not executor.called
+
+
+def test_missing_metric_id_refused():
+    executor = FakeExecutor({})
+    provider = FakeProvider(SQLProposal(
+        sql="SELECT COUNT(*) FROM `bigquery-public-data.thelook_ecommerce.orders`",
+        metric_id=None,
+    ))
+    assistant = AnalyticsAssistant(
+        FakeSettings(), provider=provider, executor=executor, date_ctx=_date_ctx()
+    )
+    result = assistant.ask("How many orders?")
+    assert result["status"] == "refused"
+    assert "metric_id" in result["reason"].lower()
     assert not executor.called
 
 
@@ -67,10 +89,12 @@ def test_answer_uses_actual_result_value():
     })
     provider = FakeProvider(SQLProposal(
         sql=(
-            "SELECT COUNT(DISTINCT o.id) AS order_count "
-            "FROM `bigquery-public-data.thelook_ecommerce.orders` AS o"
+            "SELECT COUNT(DISTINCT o.order_id) AS order_count "
+            "FROM `bigquery-public-data.thelook_ecommerce.orders` AS o "
+            "WHERE o.created_at >= @start_date AND o.created_at < @end_date"
         ),
         metric_id="order_count",
+        time_range="last_month",
     ))
     assistant = AnalyticsAssistant(
         FakeSettings(), provider=provider, executor=executor, date_ctx=_date_ctx()
@@ -78,16 +102,21 @@ def test_answer_uses_actual_result_value():
     result = assistant.ask("How many orders?")
     assert result["answer"] == "order_count: 7"
     assert result["status"] == "succeeded"
-    assert "date_context" in result
+    assert result["schema_source"] == "static"
+    assert "start_date" in executor.last_params
+    assert executor.last_params["start_date"] == "2026-09-01"
+    assert executor.last_params["end_date"] == "2026-10-01"
 
 
 def test_query_failure_is_not_replaced_with_a_number():
     provider = FakeProvider(SQLProposal(
         sql=(
-            "SELECT COUNT(DISTINCT o.id) AS order_count "
-            "FROM `bigquery-public-data.thelook_ecommerce.orders` AS o"
+            "SELECT COUNT(DISTINCT o.order_id) AS order_count "
+            "FROM `bigquery-public-data.thelook_ecommerce.orders` AS o "
+            "WHERE o.created_at >= @start_date AND o.created_at < @end_date"
         ),
         metric_id="order_count",
+        time_range="last_month",
     ))
 
     class BrokenExecutor:
@@ -107,28 +136,54 @@ def test_query_failure_is_not_replaced_with_a_number():
 
 
 def test_metric_alignment_rejects_wrong_tables():
-    from app.metric_check import check_metric_alignment
-
     metric = {
         "tables": ["bigquery-public-data.thelook_ecommerce.orders"],
-        "sql_rule": "COUNT(DISTINCT o.id) WHERE LOWER(o.status) = 'cancelled'",
+        "agg": "count_distinct",
+        "column": "order_id",
+        "time_column": "created_at",
+        "filters": [],
     }
     bad_sql = "SELECT COUNT(*) FROM `bigquery-public-data.thelook_ecommerce.products`"
     result = check_metric_alignment(bad_sql, metric)
     assert not result.ok
-    assert "missing required table" in result.reason.lower()
 
 
 def test_metric_alignment_requires_cancelled_filter():
-    from app.metric_check import check_metric_alignment
-
     metric = {
         "tables": ["bigquery-public-data.thelook_ecommerce.orders"],
-        "sql_rule": "COUNT(DISTINCT o.id) WHERE LOWER(o.status) = 'cancelled'",
+        "agg": "count_distinct",
+        "column": "order_id",
+        "time_column": "created_at",
+        "filters": [
+            {"column": "status", "op": "eq", "value": "cancelled", "case_insensitive": True}
+        ],
     }
     sql = (
-        "SELECT COUNT(DISTINCT o.id) AS cancelled_order_count "
+        "SELECT COUNT(DISTINCT o.order_id) AS cancelled_order_count "
+        "FROM `bigquery-public-data.thelook_ecommerce.orders` AS o "
+        "WHERE LOWER(o.status) = 'complete' AND o.created_at >= @start_date"
+    )
+    result = check_metric_alignment(sql, metric)
+    assert not result.ok
+
+
+def test_metric_alignment_rejects_missing_time_column():
+    metric = {
+        "tables": ["bigquery-public-data.thelook_ecommerce.orders"],
+        "agg": "count_distinct",
+        "column": "order_id",
+        "time_column": "created_at",
+        "filters": [],
+    }
+    sql = (
+        "SELECT COUNT(DISTINCT o.order_id) AS order_count "
         "FROM `bigquery-public-data.thelook_ecommerce.orders` AS o"
     )
     result = check_metric_alignment(sql, metric)
+    assert not result.ok
+    assert "time_column" in result.reason.lower() or "created_at" in result.reason.lower()
+
+
+def test_null_metric_refused_by_checker():
+    result = check_metric_alignment("SELECT 1", None)
     assert not result.ok

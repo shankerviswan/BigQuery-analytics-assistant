@@ -1,4 +1,4 @@
-"""Lightweight metric-to-SQL alignment checks (not a full semantic layer)."""
+"""Metric-to-SQL alignment using structured metric fields + sqlglot AST."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,66 +13,116 @@ class MetricCheckResult:
     reason: str = ""
 
 
-def check_metric_alignment(sql: str, metric: dict | None) -> MetricCheckResult:
-    """Cheap, deterministic checks that the SQL roughly matches the metric definition.
+def _table_names(tree: exp.Expression) -> set[str]:
+    return {
+        ".".join(p.name for p in t.parts).lower()
+        for t in tree.find_all(exp.Table)
+    }
 
-    - Required tables must appear.
-    - For cancelled_order_count: status filter must mention cancelled.
-    - For item_sales / category sales: sale_price must appear; cancelled/returned
-      exclusion is recommended (warning only if missing, still ok for PoC).
-    This is intentionally incomplete — full semantic validation belongs later.
+
+def _sql_mentions_column(tree: exp.Expression, column: str) -> bool:
+    col = column.lower()
+    for c in tree.find_all(exp.Column):
+        if c.name.lower() == col:
+            return True
+    return col in tree.sql(dialect="bigquery").lower()
+
+
+def _has_agg(tree: exp.Expression, agg: str, column: str) -> bool:
+    """Rough check that the intended aggregate appears."""
+    sql = tree.sql(dialect="bigquery").lower().replace(" ", "")
+    col = column.lower()
+    if agg == "count_distinct":
+        return f"count(distinct" in sql and col in sql
+    if agg == "sum":
+        return "sum(" in sql and col in sql
+    if agg == "count":
+        return "count(" in sql
+    return True
+
+
+def _filter_satisfied(sql_lower: str, f: dict) -> bool:
+    """Check required filter polarity appears in SQL text (pragmatic PoC).
+
+    Values must appear as quoted string literals so an alias like
+    cancelled_order_count does not satisfy status = cancelled.
+    """
+    col = (f.get("column") or "").lower()
+    op = (f.get("op") or "eq").lower()
+    val = f.get("value")
+    if not col:
+        return True
+    if col not in sql_lower:
+        return False
+
+    def _literal_present(v: str) -> bool:
+        v = v.lower()
+        return (
+            f"'{v}'" in sql_lower
+            or f'"{v}"' in sql_lower
+            or f"'{v.upper()}'" in sql_lower
+            or f"'{v.title()}'" in sql_lower
+        )
+
+    if op == "eq":
+        v = str(val).lower()
+        return _literal_present(v) and ("=" in sql_lower or " like " in sql_lower)
+    if op == "not_in":
+        values = [str(x).lower() for x in (val or [])]
+        has_neg = "not in" in sql_lower or "<>" in sql_lower or "!=" in sql_lower or " not " in sql_lower
+        has_val = any(_literal_present(v) for v in values)
+        return has_neg and has_val
+    return True
+
+
+def check_metric_alignment(sql: str, metric: dict | None) -> MetricCheckResult:
+    """Validate SQL against structured metric definition.
+
+    Requires a metric. Callers should refuse ad-hoc SQL when metric_id is missing.
     """
     if not metric:
-        return MetricCheckResult(True, "No metric selected; skipped alignment check.")
+        return MetricCheckResult(
+            False,
+            "No approved metric selected. Choose an approved metric or clarify the question.",
+        )
 
     try:
         tree = sqlglot.parse_one(sql, read="bigquery")
     except Exception as exc:
         return MetricCheckResult(False, f"Cannot parse SQL for metric check: {exc}")
 
-    tables_in_sql = {
-        ".".join(p.name for p in t.parts).lower()
-        for t in tree.find_all(exp.Table)
-    }
     required = {t.lower() for t in (metric.get("tables") or [])}
-    missing = required - tables_in_sql
+    present = _table_names(tree)
+    missing = required - present
     if missing:
         return MetricCheckResult(
             False,
             "SQL is missing required table(s) for metric: " + ", ".join(sorted(missing)),
         )
 
-    sql_lower = sql.lower()
-    metric_id = metric.get("id") or ""  # may be absent; caller can inject
+    column = metric.get("column")
+    agg = metric.get("agg")
+    if column and agg:
+        if not _has_agg(tree, agg, column):
+            return MetricCheckResult(
+                False,
+                f"Metric expects {agg}({column}), but SQL does not clearly express that aggregate.",
+            )
 
-    # Heuristic rules by known metric patterns
-    caveats = metric.get("caveats") or []
-    sql_rule = (metric.get("sql_rule") or "").lower()
-
-    if "cancelled" in sql_rule or "canceled" in sql_rule:
-        # Require a filter-like occurrence, not just an alias name.
-        has_filter = (
-            "status" in sql_lower
-            and ("cancelled" in sql_lower or "canceled" in sql_lower)
-            and ("=" in sql_lower or " in " in sql_lower or "like" in sql_lower)
+    time_col = metric.get("time_column")
+    if time_col and not _sql_mentions_column(tree, time_col):
+        return MetricCheckResult(
+            False,
+            f"Metric time_column '{time_col}' is not referenced in SQL (date filter likely missing).",
         )
-        if not has_filter:
+
+    for f in metric.get("filters") or []:
+        sql_lower = sql.lower()
+        if not _filter_satisfied(sql_lower, f):
             return MetricCheckResult(
                 False,
-                "Metric requires a cancelled-status filter, but SQL does not filter on cancelled/canceled status.",
+                f"Metric requires filter on {f.get('column')} ({f.get('op')} {f.get('value')}), "
+                "but SQL does not satisfy it.",
             )
 
-    if "sale_price" in sql_rule or "sum(oi.sale_price)" in sql_rule:
-        if "sale_price" not in sql_lower:
-            return MetricCheckResult(
-                False,
-                "Metric is based on sale_price, but SQL does not reference sale_price.",
-            )
-
-    if "count(distinct" in sql_rule and "count(distinct" not in sql_lower and "count(distinct " not in sql_lower:
-        # soft: many dialects write COUNT(DISTINCT x)
-        if "count(distinct" not in sql_lower.replace(" ", ""):
-            # still allow if COUNT appears — keep soft for PoC
-            pass
-
-    return MetricCheckResult(True, "Basic metric alignment checks passed.")
+    return MetricCheckResult(True, "Metric alignment checks passed.")

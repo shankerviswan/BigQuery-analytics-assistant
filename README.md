@@ -1,106 +1,85 @@
-# Grounded BigQuery Analytics Assistant — PoC (improved)
+# Grounded BigQuery Analytics Assistant — PoC
 
-A deliberately small local Python prototype. The LLM proposes SQL; Python applies policy and metric-alignment checks; BigQuery dry-runs and executes; the answer is formatted from actual returned rows only.
+Natural-language questions → validated SQL → BigQuery execution → answers **only from actual rows**.
 
-**Core principle:** The LLM proposes. Python validates. BigQuery executes. Actual results determine the answer.
+**Domain-agnostic:** tables and metrics live in `config/*.yaml`. The default `thelook_ecommerce` entries are **sample/reference data only** — not a product assumption. Point `allowed_tables.yaml` and `metrics.yaml` at your own datasets for a real use case.
 
-## What this version adds over the original starter
+## Design principle
 
-| Feature | Status |
-|---------|--------|
-| Table allow-list + read-only SQL (sqlglot) | Yes |
-| Dry-run + max bytes billed + timeout + row limit | Yes |
-| Hand-reviewed metric registry (YAML) | Yes |
-| Clarification on ambiguous "sales/revenue" | Yes |
-| Deterministic answer formatting (no LLM narration of numbers) | Yes |
-| **Live schema introspection** (INFORMATION_SCHEMA, allow-listed only) | **New** |
-| **Trusted date/timezone context** injected into LLM prompt | **New** |
-| **Lightweight metric-to-SQL alignment checks** | **New** |
-| Explicit DATE parameter typing for `*_date` params | **New** |
-| Structured provenance (job_id, bytes, date_context, alignment_note) | **New** |
+> The LLM proposes. Python validates. BigQuery executes. Actual results determine the answer.
 
-## Prerequisites
+## PR1 fixes (vs earlier starter)
 
-- Python 3.11+
-- Google Cloud SDK (`gcloud`)
-- A Google Cloud project with billing enabled and BigQuery API enabled
-- Optional: OpenAI-compatible LLM endpoint
+| Fix | Detail |
+|-----|--------|
+| Schema | Real thelook columns (`order_id`, not `id`); live INFORMATION_SCHEMA preferred |
+| Metric required | Ad-hoc SQL without `metric_id` is refused |
+| Structured metrics | `agg`, `column`, `filters`, `time_column` drive alignment checks |
+| Dates | Model may emit `time_range`; **Python** binds `@start_date` / `@end_date` from trusted clock |
+| Params | Date bounds bound as `TIMESTAMP` for TIMESTAMP columns |
+| Validator | CTEs and UNION allowed; CTE aliases not treated as physical tables |
+| pytest | `pytest.ini` with `pythonpath = .` so `pytest -q` works |
+| Provenance | `schema_source`, `metrics_version`, resolved date parameters |
 
 ## Setup
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env → set GOOGLE_CLOUD_PROJECT
-```
+# set GOOGLE_CLOUD_PROJECT=...
 
-```bash
-gcloud config set project YOUR_PROJECT_ID
-gcloud services enable bigquery.googleapis.com
 gcloud auth application-default login
 ```
 
-## Cost safeguards
-
-- Public dataset storage is free; **queries run in your project** and may incur charges.
-- Default `MAX_BYTES_BILLED=100000000` (~100 MB).
-- Every query is dry-run first.
-- Configure GCP billing budgets/alerts as an extra safety net.
-
-## Run tests (no network / no LLM)
+## Tests
 
 ```bash
 pytest -q
+# or: python -m pytest -q
 ```
 
-## Run the demo
+## Demo (offline, no LLM key)
 
 ```bash
-# Offline demo provider (no LLM key needed)
 python -m app.main "How many orders were created in January 2025?"
-
-# Ambiguous question → clarification, no execution
-python -m app.main "What were sales last month?"
+python -m app.main "What were sales last month?"   # clarification
 ```
 
-With a real model, set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` in `.env`.
+## Swap to your domain
 
-## Architecture (request flow)
+1. Edit `config/allowed_tables.yaml` → your fully-qualified tables.
+2. Edit `config/metrics.yaml` → your approved metrics (`agg`, `column`, `filters`, `time_column`, `tables`).
+3. Set `LIVE_SCHEMA=true` so the assistant loads real columns from INFORMATION_SCHEMA.
+4. Optionally replace DemoProvider patterns in `app/llm.py` for offline smoke tests on your domain.
+
+## Cost safeguards
+
+- Dry-run before every execution
+- `MAX_BYTES_BILLED` (default 100 MB)
+- Timeout + row limit
+- Table allow-list + read-only SQL policy
+- Configure GCP billing budgets/alerts as an extra layer
+
+## Limitations (still a PoC)
+
+- Filter polarity checks are pragmatic (text + structure), not full SQL semantics
+- No golden numeric regression suite against live BigQuery yet (`tests/golden/` is the next step)
+- No audit log persistence yet
+- Not a production IAM boundary — use a dedicated read-only service account
+
+## Architecture
 
 ```
-User question
-  → trusted DateContext (server clock + timezone)
-  → schema context (live INFORMATION_SCHEMA or static fallback)
-  → metric registry (YAML)
-  → LLM / DemoProvider proposes SQL + metric_id + params  OR  clarification
-  → metric alignment check (required tables, key filters)
-  → sqlglot policy (SELECT only, allow-list, single statement)
-  → BigQuery dry-run + max bytes
-  → BigQuery execute (parameterized)
-  → deterministic answer from rows + provenance
+question
+ → trusted DateContext
+ → schema (live INFORMATION_SCHEMA or static fallback)
+ → metrics.yaml (versioned)
+ → LLM/Demo proposes SQL + metric_id + optional time_range
+ → require metric_id
+ → metric alignment (tables, agg, time column, filters)
+ → bind dates in Python
+ → sqlglot policy (SELECT/WITH/UNION, allow-list)
+ → dry-run + execute
+ → deterministic answer + provenance
 ```
-
-## Important limitations (still a PoC)
-
-- Metric alignment is **heuristic**, not a full semantic layer.
-- No regression suite of golden questions with known numeric answers yet.
-- Schema context is column names + types only (no sample values, no relationships graph).
-- Relative dates beyond last/this month and explicit January-YYYY are limited in the demo provider.
-- Not a production security boundary — review IAM, authorized views, and column-level policies before real data.
-
-## Suggested next steps
-
-1. Golden-question regression suite (known answers against the public dataset).
-2. Stronger metric templates (SQL fragments the model must compose around).
-3. Audit log (question, metric_id, SQL, job_id, bytes, status).
-4. Optional: adopt patterns from Open_Data_QnA (ValidateSQL agent) or MetricFlow for a real semantic layer.
-
-## References used while improving this PoC
-
-- sqlglot AST policy (already present; retained)
-- Google Open_Data_QnA — explicit validate/debug agents (pattern only)
-- Vanna — schema + documentation training (we use live schema + YAML metrics instead of vector RAG for simplicity)
-- nlqueries — YAML knowledge base idea (our metrics.yaml is the lightweight equivalent)

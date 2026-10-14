@@ -8,10 +8,10 @@ class QueryRejected(Exception):
 
 
 def _infer_param_type(name: str, value) -> str:
-    """Heuristic type inference; prefer DATE for *_date params."""
+    """Prefer TIMESTAMP for date bounds compared to TIMESTAMP columns."""
     n = name.lower()
-    if n.endswith("_date") or n in {"start", "end", "start_date", "end_date"}:
-        return "DATE"
+    if n.endswith("_date") or n.endswith("_ts") or n in {"start", "end", "start_date", "end_date"}:
+        return "TIMESTAMP"
     if isinstance(value, bool):
         return "BOOL"
     if isinstance(value, int) and not isinstance(value, bool):
@@ -58,11 +58,14 @@ class BigQueryExecutor:
             if not name.replace("_", "").isalnum():
                 raise QueryRejected(f"Invalid parameter name: {name}")
             ptype = _infer_param_type(name, value)
+            bind_val = value
+            if ptype == "TIMESTAMP" and isinstance(value, str) and len(value) == 10:
+                bind_val = f"{value} 00:00:00"
             query_parameters.append(
                 bigquery.ScalarQueryParameter(
                     name,
                     ptype,
-                    str(value) if ptype in {"STRING", "DATE", "TIMESTAMP"} else value,
+                    str(bind_val) if ptype in {"STRING", "TIMESTAMP", "DATE"} else value,
                 )
             )
 
@@ -99,14 +102,13 @@ class BigQueryExecutor:
 
         truncated = len(rows) > self.max_result_rows
         rows = rows[: self.max_result_rows]
-        source_tables = extract_tables(sql)
 
         return {
             "status": "succeeded",
             "job_id": job.job_id,
             "sql": sql,
             "parameters": parameters or {},
-            "source_tables": source_tables,
+            "source_tables": extract_tables(sql),
             "estimated_bytes_processed": estimated_bytes,
             "bytes_processed": int(job.total_bytes_processed or 0),
             "bytes_billed": int(job.total_bytes_billed or 0),

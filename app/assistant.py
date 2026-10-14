@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 import yaml
 
 from app.llm import make_provider, SQLProposal
@@ -9,6 +10,7 @@ from app.date_context import build_date_context
 from app.schema import fetch_schema_context, STATIC_SCHEMA
 from app.metric_check import check_metric_alignment
 
+logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -18,6 +20,12 @@ def load_yaml(path):
 
 
 class AnalyticsAssistant:
+    """Domain-agnostic grounded analytics assistant.
+
+    Tables and metrics come from config/*.yaml — swap them for your real domain.
+    thelook_ecommerce in the default config is REFERENCE sample data only.
+    """
+
     def __init__(self, settings, provider=None, executor=None, date_ctx=None):
         self.settings = settings
         self.date_ctx = date_ctx or build_date_context(settings.business_timezone)
@@ -32,23 +40,48 @@ class AnalyticsAssistant:
         self.allowed_tables = set(
             load_yaml(ROOT / "config/allowed_tables.yaml")["allowed_tables"]
         )
-        self.metrics = load_yaml(ROOT / "config/metrics.yaml")["metrics"]
+        metrics_doc = load_yaml(ROOT / "config/metrics.yaml")
+        self.metrics = metrics_doc.get("metrics") or {}
+        self.metrics_version = str(metrics_doc.get("version") or "0")
 
-    def _schema_context(self) -> str:
+    def _schema_context(self) -> tuple[str, str]:
+        """Returns (schema_text, source) where source is live|static."""
         if not self.settings.live_schema:
-            return STATIC_SCHEMA
+            return STATIC_SCHEMA, "static"
         try:
-            return fetch_schema_context(
+            text = fetch_schema_context(
                 self.executor.client,
                 self.allowed_tables,
                 location=self.settings.location,
             )
-        except Exception:
-            return STATIC_SCHEMA
+            if "schema lookup failed" in text and all(
+                "schema lookup failed" in line for line in text.splitlines() if line.strip()
+            ):
+                logger.warning("Live schema lookup failed for all tables; using static fallback")
+                return STATIC_SCHEMA, "static"
+            return text, "live"
+        except Exception as exc:
+            logger.warning("Schema context failed (%s); using static fallback", type(exc).__name__)
+            return STATIC_SCHEMA, "static"
+
+    def _bind_dates(self, proposal: SQLProposal) -> dict:
+        """Resolve time_range via trusted clock; merge into parameters."""
+        params = dict(proposal.parameters or {})
+        if proposal.time_range:
+            try:
+                start, end = self.date_ctx.resolve(proposal.time_range)
+                params["start_date"] = start.isoformat()
+                params["end_date"] = end.isoformat()
+            except ValueError as exc:
+                raise QueryRejected(str(exc)) from exc
+        return params
 
     def ask(self, question: str) -> dict:
-        schema_context = self._schema_context()
-        metrics_context = yaml.safe_dump(self.metrics, sort_keys=True)
+        schema_context, schema_source = self._schema_context()
+        metrics_context = yaml.safe_dump(
+            {"version": self.metrics_version, "metrics": self.metrics},
+            sort_keys=True,
+        )
         date_prompt = self.date_ctx.to_prompt()
 
         proposal: SQLProposal = self.provider.propose_sql(
@@ -58,58 +91,84 @@ class AnalyticsAssistant:
             date_context=date_prompt,
         )
 
+        base_meta = {
+            "schema_source": schema_source,
+            "metrics_version": self.metrics_version,
+            "date_context": {
+                "timezone": self.date_ctx.timezone,
+                "today": self.date_ctx.today.isoformat(),
+            },
+        }
+
         if proposal.clarification:
             return {
                 "status": "clarification_required",
                 "question": proposal.clarification,
-                "date_context": {
-                    "timezone": self.date_ctx.timezone,
-                    "today": self.date_ctx.today.isoformat(),
-                },
+                **base_meta,
             }
         if not proposal.sql:
             return {
                 "status": "refused",
                 "reason": "The model did not provide SQL or a clarification.",
+                **base_meta,
             }
-        if proposal.metric_id and proposal.metric_id not in self.metrics:
+        if not proposal.metric_id:
             return {
                 "status": "refused",
-                "reason": "The model selected an unapproved metric.",
+                "reason": "metric_id is required. Ad-hoc unaligned SQL is not allowed in this PoC.",
+                "proposed_sql": proposal.sql,
+                **base_meta,
+            }
+        if proposal.metric_id not in self.metrics:
+            return {
+                "status": "refused",
+                "reason": f"Unapproved metric_id: {proposal.metric_id}",
+                "proposed_sql": proposal.sql,
+                **base_meta,
             }
 
-        metric_def = self.metrics.get(proposal.metric_id or "", {})
-        # Inject id for the checker convenience
-        if proposal.metric_id and "id" not in metric_def:
-            metric_def = {**metric_def, "id": proposal.metric_id}
-
-        alignment = check_metric_alignment(proposal.sql, metric_def if metric_def else None)
+        metric_def = {**self.metrics[proposal.metric_id], "id": proposal.metric_id}
+        alignment = check_metric_alignment(proposal.sql, metric_def)
         if not alignment.ok:
             return {
                 "status": "refused",
                 "reason": alignment.reason,
                 "proposed_sql": proposal.sql,
                 "metric_id": proposal.metric_id,
+                **base_meta,
             }
 
         try:
-            result = self.executor.execute(
-                proposal.sql, proposal.parameters or {}, self.allowed_tables
-            )
+            params = self._bind_dates(proposal)
         except QueryRejected as exc:
             return {
                 "status": "rejected",
                 "reason": str(exc),
                 "proposed_sql": proposal.sql,
                 "metric_id": proposal.metric_id,
+                **base_meta,
+            }
+
+        try:
+            result = self.executor.execute(proposal.sql, params, self.allowed_tables)
+        except QueryRejected as exc:
+            return {
+                "status": "rejected",
+                "reason": str(exc),
+                "proposed_sql": proposal.sql,
+                "metric_id": proposal.metric_id,
+                **base_meta,
             }
 
         result["metric_id"] = proposal.metric_id
-        result["metric_definition"] = self.metrics.get(proposal.metric_id or "", {})
+        result["metric_definition"] = self.metrics.get(proposal.metric_id or {}, {})
+        result["metrics_version"] = self.metrics_version
+        result["schema_source"] = schema_source
         result["date_context"] = {
             "timezone": self.date_ctx.timezone,
             "today": self.date_ctx.today.isoformat(),
-            "parameters": proposal.parameters or {},
+            "time_range": proposal.time_range,
+            "parameters": params,
         }
         result["answer"] = self._format_answer(result)
         result["alignment_note"] = alignment.reason
@@ -117,7 +176,6 @@ class AnalyticsAssistant:
 
     @staticmethod
     def _format_answer(result: dict) -> str:
-        # Deliberately deterministic: no LLM can add unsupported numbers.
         if not result.get("rows"):
             return "The query executed successfully but returned no rows."
         if len(result["rows"]) == 1 and len(result["rows"][0]) == 1:
