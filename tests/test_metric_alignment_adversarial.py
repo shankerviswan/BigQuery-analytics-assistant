@@ -123,6 +123,136 @@ def test_accepts_valid_cancelled():
     assert result.ok, result.reason
 
 
+def test_rejects_substring_column_in_aggregate():
+    sql = f"""
+    SELECT COUNT(DISTINCT o.shipped_order_id) AS order_count
+    FROM `{ORDERS}` AS o
+    WHERE o.created_at >= @start_date AND o.created_at < @end_date
+    """
+    assert not check_metric_alignment(sql, order_count_metric).ok
+
+
+def test_rejects_wide_in_for_eq():
+    sql = f"""
+    SELECT COUNT(DISTINCT o.order_id) AS cancelled_order_count
+    FROM `{ORDERS}` AS o
+    WHERE o.status IN ('cancelled', 'complete')
+      AND o.created_at >= @start_date AND o.created_at < @end_date
+    """
+    assert not check_metric_alignment(sql, cancelled_metric).ok
+
+
+def test_rejects_partial_not_in():
+    sql = f"""
+    SELECT SUM(sale_price) AS item_sales_value
+    FROM `{ORDER_ITEMS}`
+    WHERE LOWER(status) NOT IN ('cancelled')
+      AND created_at >= @start_date AND created_at < @end_date
+    """
+    assert not check_metric_alignment(sql, item_sales_metric).ok
+
+
+def test_rejects_decoy_cte_with_unfiltered_outer_query():
+    sql = f"""
+    WITH decoy AS (
+      SELECT * FROM `{ORDERS}` AS o
+      WHERE LOWER(o.status) = 'cancelled'
+        AND o.created_at >= @start_date AND o.created_at < @end_date
+    )
+    SELECT COUNT(DISTINCT o.order_id) FROM `{ORDERS}` AS o
+    """
+    assert not check_metric_alignment(sql, cancelled_metric).ok
+
+
+def test_rejects_params_that_are_not_bounds_on_the_time_column():
+    sql = f"""
+    SELECT COUNT(DISTINCT o.order_id)
+    FROM `{ORDERS}` AS o
+    WHERE LOWER(o.status) = 'cancelled'
+      AND @start_date < @end_date
+    """
+    assert not check_metric_alignment(sql, cancelled_metric).ok
+
+
+def test_rejects_inclusive_end_bound():
+    sql = f"""
+    SELECT COUNT(DISTINCT o.order_id)
+    FROM `{ORDERS}` AS o
+    WHERE o.created_at > @start_date AND o.created_at <= @end_date
+    """
+    assert not check_metric_alignment(sql, order_count_metric).ok
+
+
+def test_rejects_union_branch_without_bounds():
+    sql = f"""
+    SELECT COUNT(DISTINCT o.order_id) FROM `{ORDERS}` AS o
+    WHERE o.created_at >= @start_date AND o.created_at < @end_date
+    UNION ALL
+    SELECT COUNT(DISTINCT o.order_id) FROM `{ORDERS}` AS o
+    """
+    assert not check_metric_alignment(sql, order_count_metric).ok
+
+
+def test_rejects_cross_join_even_with_group_by():
+    sql = f"""
+    SELECT p.category, SUM(oi.sale_price)
+    FROM `{ORDER_ITEMS}` AS oi
+    CROSS JOIN `{PRODUCTS}` AS p
+    WHERE LOWER(oi.status) NOT IN ('cancelled', 'returned')
+      AND oi.created_at >= @start_date AND oi.created_at < @end_date
+    GROUP BY p.category
+    """
+    assert not check_metric_alignment(sql, category_metric).ok
+
+
+def test_accepts_parenthesized_lower_eq():
+    sql = f"""
+    SELECT COUNT(DISTINCT o.order_id) AS cancelled_order_count
+    FROM `{ORDERS}` AS o
+    WHERE (LOWER(o.status) = 'cancelled')
+      AND o.created_at >= @start_date AND o.created_at < @end_date
+    """
+    result = check_metric_alignment(sql, cancelled_metric)
+    assert result.ok, result.reason
+
+
+def test_accepts_filters_applied_in_selected_cte():
+    sql = f"""
+    WITH filtered AS (
+      SELECT * FROM `{ORDERS}` AS o
+      WHERE LOWER(o.status) = 'cancelled'
+        AND o.created_at >= @start_date AND o.created_at < @end_date
+    )
+    SELECT COUNT(DISTINCT order_id) AS cancelled_order_count FROM filtered
+    """
+    result = check_metric_alignment(sql, cancelled_metric)
+    assert result.ok, result.reason
+
+
+def test_accepts_not_in_via_lower_inequalities():
+    sql = f"""
+    SELECT SUM(sale_price) AS item_sales_value
+    FROM `{ORDER_ITEMS}`
+    WHERE LOWER(status) != 'cancelled' AND LOWER(status) != 'returned'
+      AND created_at >= @start_date AND created_at < @end_date
+    """
+    result = check_metric_alignment(sql, item_sales_metric)
+    assert result.ok, result.reason
+
+
+def test_accepts_equijoin_category_sales():
+    sql = f"""
+    SELECT p.category, SUM(oi.sale_price) AS category_item_sales
+    FROM `{ORDER_ITEMS}` AS oi
+    JOIN `{PRODUCTS}` AS p ON oi.product_id = p.id
+    WHERE LOWER(oi.status) NOT IN ('cancelled', 'returned')
+      AND oi.created_at >= @start_date AND oi.created_at < @end_date
+    GROUP BY p.category
+    """
+    result = check_metric_alignment(sql, category_metric)
+    assert result.ok, result.reason
+
+
 def test_accepts_valid_order_count():
     sql = f"""
     SELECT COUNT(DISTINCT o.order_id) AS order_count

@@ -79,6 +79,11 @@ def validate_sql(sql: str, allowed_tables: set[str]) -> ValidationResult:
     if unauthorized:
         return ValidationResult(False, "Unauthorized table(s): " + ", ".join(sorted(unauthorized)))
 
+    for dot in tree.find_all(exp.Dot):
+        left = getattr(dot.this, "name", None)
+        right = getattr(dot.expression, "name", None)
+        if str(left).upper() in {"AI", "ML"} and right:
+            return ValidationResult(False, f"Disallowed operation: {str(left).upper()}.{str(right).upper()}")
     for fn in tree.find_all(exp.Anonymous):
         name = (fn.name or "").upper()
         if name in {"EXTERNAL_QUERY", "EXECUTE IMMEDIATE"} or name.startswith(("ML.", "AI.")):

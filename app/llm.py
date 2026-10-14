@@ -86,11 +86,12 @@ WHERE o.created_at >= @start_date
 class OpenAICompatibleProvider:
     """Adapter for providers exposing an OpenAI-compatible Chat Completions API."""
 
-    def __init__(self, base_url: str, api_key: str, model: str):
+    def __init__(self, base_url: str, api_key: str, model: str, disable_thinking: bool = False):
         from openai import OpenAI
 
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model = model
+        self.disable_thinking = disable_thinking
 
     def propose_sql(
         self,
@@ -109,17 +110,18 @@ class OpenAICompatibleProvider:
             "and leave start_date/end_date for the service to bind from the trusted clock. "
             "Always use half-open date ranges in SQL: col >= @start_date AND col < @end_date. "
             "Never hardcode date literals on the metric time column. "
+            "For a case-insensitive metric filter, compare LOWER(column) to the lowercase literal. "
             "metric_id is required when proposing SQL."
         )
         user_content = question
         if date_context:
             user_content = date_context + "\n\nUser question: " + question
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
+        request = {
+            "model": self.model,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [
                 {
                     "role": "system",
                     "content": (
@@ -132,11 +134,23 @@ class OpenAICompatibleProvider:
                 },
                 {"role": "user", "content": user_content},
             ],
-        )
-        data = json.loads(response.choices[0].message.content or "{}")
+        }
+        if self.disable_thinking:
+            request["extra_body"] = {"thinking": {"type": "disabled"}}
+        response = self.client.chat.completions.create(**request)
+        raw = response.choices[0].message.content or "{}"
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return SQLProposal(clarification="The model did not return valid JSON.")
+        if not isinstance(data, dict):
+            return SQLProposal(clarification="The model did not return a JSON object.")
+        parameters = data.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            return SQLProposal(clarification="The model returned parameters that are not a JSON object.")
         return SQLProposal(
             sql=data.get("sql"),
-            parameters=data.get("parameters") or {},
+            parameters=parameters,
             clarification=data.get("clarification"),
             metric_id=data.get("metric_id"),
             time_range=data.get("time_range"),
@@ -146,6 +160,9 @@ class OpenAICompatibleProvider:
 def make_provider(settings, date_ctx: DateContext | None = None):
     if settings.llm_base_url and settings.llm_api_key and settings.llm_model:
         return OpenAICompatibleProvider(
-            settings.llm_base_url, settings.llm_api_key, settings.llm_model
+            settings.llm_base_url,
+            settings.llm_api_key,
+            settings.llm_model,
+            disable_thinking=bool(getattr(settings, "llm_disable_thinking", False)),
         )
     return DemoProvider(date_ctx=date_ctx)

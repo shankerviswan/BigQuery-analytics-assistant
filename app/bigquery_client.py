@@ -10,14 +10,14 @@ class QueryRejected(Exception):
 def _infer_param_type(name: str, value) -> str:
     """Infer BigQuery parameter types.
 
-    start_date/end_date are DATE so half-open comparisons against TIMESTAMP
-    columns use midnight in a timezone-independent way (date boundary).
-    Only names exactly start_date/end_date are forced to DATE — not *every*
-    *_date column name (e.g. birth_date stays STRING unless typed otherwise).
+    start_date/end_date are TIMESTAMP instants already resolved in the business
+    timezone (midnight at the boundary). A DATE parameter cannot be compared
+    directly to a TIMESTAMP column. Only those two names are forced to
+    TIMESTAMP — birth_date and other *_date names stay STRING.
     """
     n = name.lower()
     if n in {"start_date", "end_date"}:
-        return "DATE"
+        return "TIMESTAMP"
     if n.endswith("_ts") or n in {"start", "end"}:
         return "TIMESTAMP"
     if isinstance(value, bool):

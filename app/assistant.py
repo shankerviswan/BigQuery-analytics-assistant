@@ -83,8 +83,8 @@ class AnalyticsAssistant:
         if proposal.time_range:
             try:
                 start, end = self.date_ctx.resolve(proposal.time_range)
-                params["start_date"] = start.isoformat()
-                params["end_date"] = end.isoformat()
+                params["start_date"] = self.date_ctx.as_timestamp(start)
+                params["end_date"] = self.date_ctx.as_timestamp(end)
             except ValueError as exc:
                 raise QueryRejected(str(exc)) from exc
         return params

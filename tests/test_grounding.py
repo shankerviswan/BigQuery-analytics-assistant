@@ -104,8 +104,8 @@ def test_answer_uses_actual_result_value():
     assert result["status"] == "succeeded"
     assert result["schema_source"] == "static"
     assert "start_date" in executor.last_params
-    assert executor.last_params["start_date"] == "2026-09-01"
-    assert executor.last_params["end_date"] == "2026-10-01"
+    assert executor.last_params["start_date"] == "2026-09-01T00:00:00+00:00"
+    assert executor.last_params["end_date"] == "2026-10-01T00:00:00+00:00"
 
 
 def test_query_failure_is_not_replaced_with_a_number():

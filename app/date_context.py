@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -69,6 +69,14 @@ class DateContext:
         if year is not None and month is not None:
             return self.month(year, month)
         raise ValueError(f"Unsupported time_range kind: {kind}")
+
+    def as_timestamp(self, day: date) -> str:
+        """Midnight at the start of day in the business timezone, as an RFC3339 timestamp."""
+        try:
+            tz = ZoneInfo(self.timezone)
+        except Exception:
+            tz = timezone.utc
+        return datetime.combine(day, time.min, tzinfo=tz).isoformat(timespec="seconds")
 
     def to_prompt(self) -> str:
         lm_s, lm_e = self.last_month()

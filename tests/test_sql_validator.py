@@ -53,6 +53,13 @@ def test_allows_union():
     assert result.ok, result.reason
 
 
+def test_rejects_ai_generate_dotted_call():
+    sql = "SELECT AI.GENERATE('hi') AS x FROM `bigquery-public-data.thelook_ecommerce.orders`"
+    result = validate_sql(sql, ALLOWED)
+    assert not result.ok
+    assert "AI.GENERATE" in result.reason
+
+
 def test_rejects_external_query():
     sql = "SELECT * FROM EXTERNAL_QUERY('conn', 'SELECT 1')"
     assert not validate_sql(sql, ALLOWED).ok
