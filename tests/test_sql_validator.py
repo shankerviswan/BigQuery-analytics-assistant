@@ -13,7 +13,7 @@ def test_allows_select_from_allowlisted_table():
 
 
 def test_rejects_delete():
-    sql = "DELETE FROM `bigquery-public-data.thelook_ecommerce.orders` WHERE id = 1"
+    sql = "DELETE FROM `bigquery-public-data.thelook_ecommerce.orders` WHERE order_id = 1"
     assert not validate_sql(sql, ALLOWED).ok
 
 
@@ -25,19 +25,46 @@ def test_rejects_unapproved_table():
 
 
 def test_rejects_multiple_statements():
-    sql = "SELECT 1; SELECT 2"
-    assert not validate_sql(sql, ALLOWED).ok
+    assert not validate_sql("SELECT 1; SELECT 2", ALLOWED).ok
 
 
 def test_rejects_select_without_table():
     assert not validate_sql("SELECT 1", ALLOWED).ok
 
 
-def test_extract_tables():
-    sql = (
-        "SELECT o.id FROM `bigquery-public-data.thelook_ecommerce.orders` o "
-        "JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi ON o.id = oi.order_id"
+def test_allows_cte_against_allowlisted_table():
+    sql = """
+    WITH t AS (
+      SELECT order_id FROM `bigquery-public-data.thelook_ecommerce.orders`
     )
+    SELECT * FROM t
+    """
+    result = validate_sql(sql, ALLOWED)
+    assert result.ok, result.reason
+
+
+def test_allows_union():
+    sql = """
+    SELECT order_id FROM `bigquery-public-data.thelook_ecommerce.orders`
+    UNION ALL
+    SELECT order_id FROM `bigquery-public-data.thelook_ecommerce.orders`
+    """
+    result = validate_sql(sql, ALLOWED)
+    assert result.ok, result.reason
+
+
+def test_rejects_external_query():
+    sql = "SELECT * FROM EXTERNAL_QUERY('conn', 'SELECT 1')"
+    assert not validate_sql(sql, ALLOWED).ok
+
+
+def test_extract_tables_excludes_cte_alias():
+    sql = """
+    WITH t AS (
+      SELECT order_id FROM `bigquery-public-data.thelook_ecommerce.orders`
+    )
+    SELECT * FROM t
+    """
     tables = extract_tables(sql)
     assert "bigquery-public-data.thelook_ecommerce.orders" in tables
-    assert "bigquery-public-data.thelook_ecommerce.order_items" in tables
+    assert "t" not in tables
