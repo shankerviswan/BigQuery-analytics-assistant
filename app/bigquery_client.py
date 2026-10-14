@@ -8,9 +8,17 @@ class QueryRejected(Exception):
 
 
 def _infer_param_type(name: str, value) -> str:
-    """Prefer TIMESTAMP for date bounds compared to TIMESTAMP columns."""
+    """Infer BigQuery parameter types.
+
+    start_date/end_date are DATE so half-open comparisons against TIMESTAMP
+    columns use midnight in a timezone-independent way (date boundary).
+    Only names exactly start_date/end_date are forced to DATE — not *every*
+    *_date column name (e.g. birth_date stays STRING unless typed otherwise).
+    """
     n = name.lower()
-    if n.endswith("_date") or n.endswith("_ts") or n in {"start", "end", "start_date", "end_date"}:
+    if n in {"start_date", "end_date"}:
+        return "DATE"
+    if n.endswith("_ts") or n in {"start", "end"}:
         return "TIMESTAMP"
     if isinstance(value, bool):
         return "BOOL"
@@ -59,8 +67,8 @@ class BigQueryExecutor:
                 raise QueryRejected(f"Invalid parameter name: {name}")
             ptype = _infer_param_type(name, value)
             bind_val = value
-            if ptype == "TIMESTAMP" and isinstance(value, str) and len(value) == 10:
-                bind_val = f"{value} 00:00:00"
+            if ptype == "DATE" and isinstance(value, str) and len(value) >= 10:
+                bind_val = value[:10]
             query_parameters.append(
                 bigquery.ScalarQueryParameter(
                     name,

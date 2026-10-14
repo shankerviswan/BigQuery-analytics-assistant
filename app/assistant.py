@@ -64,9 +64,22 @@ class AnalyticsAssistant:
             logger.warning("Schema context failed (%s); using static fallback", type(exc).__name__)
             return STATIC_SCHEMA, "static"
 
-    def _bind_dates(self, proposal: SQLProposal) -> dict:
-        """Resolve time_range via trusted clock; merge into parameters."""
+    def _bind_dates(self, proposal: SQLProposal, metric: dict | None = None) -> dict:
+        """Resolve time_range via trusted clock.
+
+        When the metric declares a time_column, a time_range is required and any
+        LLM-supplied start_date/end_date are ignored so the trusted clock wins.
+        """
         params = dict(proposal.parameters or {})
+        needs_time = bool(metric and metric.get("time_column"))
+        if needs_time:
+            params.pop("start_date", None)
+            params.pop("end_date", None)
+            if not proposal.time_range:
+                raise QueryRejected(
+                    "Metric requires a time range. Provide time_range "
+                    "(e.g. last_month, january_2024) so the service can bind dates."
+                )
         if proposal.time_range:
             try:
                 start, end = self.date_ctx.resolve(proposal.time_range)
@@ -139,7 +152,7 @@ class AnalyticsAssistant:
             }
 
         try:
-            params = self._bind_dates(proposal)
+            params = self._bind_dates(proposal, metric_def)
         except QueryRejected as exc:
             return {
                 "status": "rejected",
@@ -161,7 +174,7 @@ class AnalyticsAssistant:
             }
 
         result["metric_id"] = proposal.metric_id
-        result["metric_definition"] = self.metrics.get(proposal.metric_id or {}, {})
+        result["metric_definition"] = self.metrics.get(proposal.metric_id or "", {})
         result["metrics_version"] = self.metrics_version
         result["schema_source"] = schema_source
         result["date_context"] = {

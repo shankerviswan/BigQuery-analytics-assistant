@@ -1,0 +1,38 @@
+# Golden / must_reject cases for the grounded assistant.
+# Offline cases use StubProvider; live cases are marked with needs_bq: true.
+version: 1
+cases:
+  - id: sales_ambiguous
+    question: "What were sales last month?"
+    as_of: "2026-10-14"
+    must_status: clarification_required
+
+  - id: january_2024_not_2025
+    question: "How many orders were created in January 2024?"
+    as_of: "2026-10-14"
+    expect_time_range: january_2024
+    notes: "DemoProvider must not hardcode 2025"
+
+  - id: cte_bypass_users
+    question: "(policy) CTE hide users table"
+    must_reject_sql: |
+      WITH users AS (
+        SELECT order_id FROM `bigquery-public-data.thelook_ecommerce.orders`
+      )
+      SELECT * FROM `bigquery-public-data.thelook_ecommerce.users`
+    notes: "P0 validator bypass"
+
+  - id: wrong_cancelled_filter
+    must_reject_sql: |
+      SELECT COUNT(DISTINCT o.order_id) AS cancelled_order_count
+      FROM `bigquery-public-data.thelook_ecommerce.orders` AS o
+      WHERE o.status != 'cancelled'
+        AND o.created_at >= @start_date AND o.created_at < @end_date
+    expect_metric: cancelled_order_count
+
+  - id: hardcoded_dates
+    must_reject_sql: |
+      SELECT COUNT(DISTINCT o.order_id) AS order_count
+      FROM `bigquery-public-data.thelook_ecommerce.orders` AS o
+      WHERE o.created_at >= '2019-01-01' AND o.created_at < '2019-02-01'
+    expect_metric: order_count
