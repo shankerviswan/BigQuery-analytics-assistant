@@ -1,5 +1,6 @@
-# Only these tables may be queried in the first PoC.
-# Dataset is public; query jobs still run in YOUR project.
+# Allow-list of fully-qualified tables the assistant may query.
+# Replace these with YOUR datasets/tables for a real deployment.
+# thelook_ecommerce is sample/reference data only — not the product domain.
 allowed_tables:
   - bigquery-public-data.thelook_ecommerce.orders
   - bigquery-public-data.thelook_ecommerce.order_items

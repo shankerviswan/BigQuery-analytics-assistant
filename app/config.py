@@ -16,7 +16,6 @@ class Settings:
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     llm_model: str | None = None
-    # When True, try live INFORMATION_SCHEMA; fall back to static schema on failure.
     live_schema: bool = True
 
 
