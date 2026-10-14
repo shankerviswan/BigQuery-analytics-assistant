@@ -37,10 +37,15 @@ class DateContext:
             end = date(self.today.year, 3 * q + 1, 1)
         return start, end
 
-    def january_of(self, year: int) -> tuple[date, date]:
-        return date(year, 1, 1), date(year, 2, 1)
+    def month(self, year: int, month: int) -> tuple[date, date]:
+        start = date(year, month, 1)
+        if month == 12:
+            end = date(year + 1, 1, 1)
+        else:
+            end = date(year, month + 1, 1)
+        return start, end
 
-    def resolve(self, kind: str, year: int | None = None) -> tuple[date, date]:
+    def resolve(self, kind: str, year: int | None = None, month: int | None = None) -> tuple[date, date]:
         """Resolve a structured time_range kind into half-open dates."""
         k = (kind or "").lower().replace(" ", "_")
         if k in {"last_month", "previous_month"}:
@@ -49,10 +54,20 @@ class DateContext:
             return self.this_month()
         if k in {"last_quarter", "previous_quarter"}:
             return self.last_quarter()
-        if k in {"january", "january_2025"} or (k.startswith("january_") and year):
-            return self.january_of(year or 2025)
-        if k.startswith("january_") and k.split("_")[-1].isdigit():
-            return self.january_of(int(k.split("_")[-1]))
+        if k.startswith("january_"):
+            y = k.split("_")[-1]
+            if y.isdigit():
+                return self.month(int(y), 1)
+        if k == "january":
+            if year is None:
+                raise ValueError("january requires an explicit year (e.g. january_2024)")
+            return self.month(year, 1)
+        if k.startswith("month_"):
+            parts = k.split("_")
+            if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+                return self.month(int(parts[1]), int(parts[2]))
+        if year is not None and month is not None:
+            return self.month(year, month)
         raise ValueError(f"Unsupported time_range kind: {kind}")
 
     def to_prompt(self) -> str:
@@ -67,8 +82,10 @@ class DateContext:
             f"- last_month (half-open): {lm_s.isoformat()} .. {lm_e.isoformat()}\n"
             f"- this_month (half-open): {tm_s.isoformat()} .. {tm_e.isoformat()}\n"
             f"- last_quarter (half-open): {lq_s.isoformat()} .. {lq_e.isoformat()}\n"
-            f"Prefer returning time_range kind (last_month, this_month, last_quarter, january_YYYY) "
-            f"and let the service bind dates. Always use half-open intervals.\n"
+            f"Prefer returning time_range as last_month, this_month, last_quarter, "
+            f"january_YYYY, or month_YYYY_MM and let the service bind dates.\n"
+            f"Always use half-open intervals with @start_date / @end_date.\n"
+            f"Never hardcode date literals for the metric time column.\n"
             f"If the relative period is not listed, ask for clarification."
         )
 
