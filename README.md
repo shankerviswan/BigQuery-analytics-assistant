@@ -39,12 +39,34 @@ pytest -q
 # or: python -m pytest -q
 ```
 
-## Demo (offline, no LLM key)
+## Demo
+
+No LLM key is required. Leave `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` empty and the demo provider answers a few fixed phrasings.
+
+Once Application Default Credentials exist, the order-count command runs a real BigQuery job. The sales command stops at clarification and does not query.
 
 ```bash
-python -m app.main "How many orders were created in January 2025?"
-python -m app.main "What were sales last month?"   # clarification
+python -m app.main "How many orders were created in January 2024?"
+python -m app.main "What were sales last month?"   # clarification, no query
 ```
+
+## Verified live query
+
+Recorded 2026-10-14 with the demo provider (no LLM) against public `thelook_ecommerce.orders`, job run in project `bigquery-assistance`:
+
+| Field | Value |
+|---|---|
+| Question | How many orders were created in January 2024? |
+| Metric | `order_count` |
+| Time range | `january_2024` (`America/Los_Angeles`) |
+| Parameters | `2024-01-01T00:00:00-08:00` .. `2024-02-01T00:00:00-08:00` |
+| Schema | `live` |
+| Answer | `order_count: 1409` |
+| Bytes processed | 2,009,344 |
+| Bytes billed | 10,485,760 (BigQuery’s 10 MiB on-demand minimum) |
+| Job id | `62faf47c-6e8b-4493-8e85-efa3501d7e45` |
+
+`pytest` replays this count. It does not re-query BigQuery.
 
 ## Swap to your domain
 
@@ -63,8 +85,8 @@ python -m app.main "What were sales last month?"   # clarification
 
 ## Limitations (still a PoC)
 
-- Filter polarity checks are pragmatic (text + structure), not full SQL semantics
-- No golden numeric regression suite against live BigQuery yet (`tests/golden/` is the next step)
+- Filter and join checks are structural. A join can pass without being the metric’s real keys
+- One live count is recorded (`order_count` for January 2024 = 1409). The suite does not re-run it against BigQuery
 - No audit log persistence yet
 - Not a production IAM boundary — use a dedicated read-only service account
 

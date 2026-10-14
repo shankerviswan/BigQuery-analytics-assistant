@@ -11,7 +11,17 @@ cases:
     question: "How many orders were created in January 2024?"
     as_of: "2026-10-14"
     expect_time_range: january_2024
-    notes: "DemoProvider must not hardcode 2025"
+    expect_order_count: 1409
+    expect_start: "2024-01-01T00:00:00-08:00"
+    expect_end: "2024-02-01T00:00:00-08:00"
+    timezone: America/Los_Angeles
+    live_job_id: "62faf47c-6e8b-4493-8e85-efa3501d7e45"
+    live_bytes_processed: 2009344
+    live_bytes_billed: 10485760
+    notes: >
+      Verified 2026-10-14 on project bigquery-assistance against public
+      thelook orders. DemoProvider, no LLM. bytes_billed is BigQuery's
+      10 MiB minimum. Offline tests replay this count and do not re-query.
 
   - id: cte_bypass_users
     question: "(policy) CTE hide users table"
