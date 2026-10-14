@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.date_context import DateContext, build_date_context
+
+
+def _extract_month_kind(q: str) -> str | None:
+    """Parse 'january 2024' / 'jan 2023' into january_YYYY. No hardcoded year."""
+    m = re.search(r"\b(january|jan)\s+(20\d{2})\b", q, re.I)
+    if m:
+        return f"january_{m.group(2)}"
+    m = re.search(r"\b(20\d{2})[-/](0?1)\b", q)
+    if m:
+        return f"january_{m.group(1)}"
+    return None
 
 
 @dataclass
@@ -13,7 +25,6 @@ class SQLProposal:
     parameters: dict[str, Any] = field(default_factory=dict)
     clarification: str | None = None
     metric_id: str | None = None
-    # Structured relative period; Python resolves to concrete dates.
     time_range: str | None = None
 
 
@@ -44,7 +55,7 @@ class DemoProvider:
                 )
             )
         if "cancel" in q:
-            tr = "january_2025" if ("2025" in q or "january" in q) else "last_month"
+            tr = _extract_month_kind(q) or "last_month"
             return SQLProposal(
                 sql="""SELECT COUNT(DISTINCT o.order_id) AS cancelled_order_count
 FROM `bigquery-public-data.thelook_ecommerce.orders` AS o
@@ -55,10 +66,7 @@ WHERE LOWER(o.status) = 'cancelled'
                 time_range=tr,
             )
         if "order" in q and ("how many" in q or "count" in q or "created" in q):
-            if "2025" in q or "january" in q:
-                tr = "january_2025"
-            else:
-                tr = "last_month"
+            tr = _extract_month_kind(q) or "last_month"
             return SQLProposal(
                 sql="""SELECT COUNT(DISTINCT o.order_id) AS order_count
 FROM `bigquery-public-data.thelook_ecommerce.orders` AS o
@@ -97,9 +105,10 @@ class OpenAICompatibleProvider:
             "If the metric, date range, timezone, or required filters are ambiguous, ask a clarification. "
             "Never invent columns or metric formulas. "
             "Return JSON with keys: sql, parameters, clarification, metric_id, time_range. "
-            "Prefer time_range as one of: last_month, this_month, last_quarter, january_YYYY "
+            "Prefer time_range as one of: last_month, this_month, last_quarter, january_YYYY, month_YYYY_MM "
             "and leave start_date/end_date for the service to bind from the trusted clock. "
             "Always use half-open date ranges in SQL: col >= @start_date AND col < @end_date. "
+            "Never hardcode date literals on the metric time column. "
             "metric_id is required when proposing SQL."
         )
         user_content = question
