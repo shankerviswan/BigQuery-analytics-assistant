@@ -13,10 +13,15 @@ class SQLProposal:
     parameters: dict[str, Any] = field(default_factory=dict)
     clarification: str | None = None
     metric_id: str | None = None
+    # Structured relative period; Python resolves to concrete dates.
+    time_range: str | None = None
 
 
 class DemoProvider:
-    """Deterministic offline provider for architecture tests and demos."""
+    """Deterministic offline provider for architecture tests and demos.
+
+    Uses thelook sample only as REFERENCE data — not a product domain assumption.
+    """
 
     def __init__(self, date_ctx: DateContext | None = None):
         self.date_ctx = date_ctx or build_date_context()
@@ -39,34 +44,33 @@ class DemoProvider:
                 )
             )
         if "cancel" in q:
-            start, end = self.date_ctx.january_of(2025)
+            tr = "january_2025" if ("2025" in q or "january" in q) else "last_month"
             return SQLProposal(
-                sql="""SELECT COUNT(DISTINCT o.id) AS cancelled_order_count
+                sql="""SELECT COUNT(DISTINCT o.order_id) AS cancelled_order_count
 FROM `bigquery-public-data.thelook_ecommerce.orders` AS o
 WHERE LOWER(o.status) = 'cancelled'
   AND o.created_at >= @start_date
   AND o.created_at < @end_date""",
-                parameters={"start_date": start.isoformat(), "end_date": end.isoformat()},
                 metric_id="cancelled_order_count",
+                time_range=tr,
             )
         if "order" in q and ("how many" in q or "count" in q or "created" in q):
-            # Prefer explicit year if mentioned, else last_month from trusted clock
             if "2025" in q or "january" in q:
-                start, end = self.date_ctx.january_of(2025)
+                tr = "january_2025"
             else:
-                start, end = self.date_ctx.last_month()
+                tr = "last_month"
             return SQLProposal(
-                sql="""SELECT COUNT(DISTINCT o.id) AS order_count
+                sql="""SELECT COUNT(DISTINCT o.order_id) AS order_count
 FROM `bigquery-public-data.thelook_ecommerce.orders` AS o
 WHERE o.created_at >= @start_date
   AND o.created_at < @end_date""",
-                parameters={"start_date": start.isoformat(), "end_date": end.isoformat()},
                 metric_id="order_count",
+                time_range=tr,
             )
         return SQLProposal(
             clarification=(
                 "I cannot map that question to an approved metric in this PoC. "
-                "Please choose order count, cancelled order count, or clarify the intended sales definition."
+                "Please choose an approved metric or clarify the intended definition."
             )
         )
 
@@ -92,10 +96,11 @@ class OpenAICompatibleProvider:
             "Use only the provided schema and approved metric definitions. "
             "If the metric, date range, timezone, or required filters are ambiguous, ask a clarification. "
             "Never invent columns or metric formulas. "
-            "Return JSON with keys: sql, parameters, clarification, metric_id. "
-            "parameters must contain only scalar values (prefer ISO dates for date params). "
-            "Use the trusted date context for relative periods; if a relative period is not covered, ask for clarification. "
-            "Always prefer half-open date ranges (start inclusive, end exclusive)."
+            "Return JSON with keys: sql, parameters, clarification, metric_id, time_range. "
+            "Prefer time_range as one of: last_month, this_month, last_quarter, january_YYYY "
+            "and leave start_date/end_date for the service to bind from the trusted clock. "
+            "Always use half-open date ranges in SQL: col >= @start_date AND col < @end_date. "
+            "metric_id is required when proposing SQL."
         )
         user_content = question
         if date_context:
@@ -125,6 +130,7 @@ class OpenAICompatibleProvider:
             parameters=data.get("parameters") or {},
             clarification=data.get("clarification"),
             metric_id=data.get("metric_id"),
+            time_range=data.get("time_range"),
         )
 
 
