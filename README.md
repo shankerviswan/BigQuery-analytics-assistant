@@ -66,7 +66,21 @@ Recorded 2026-10-14 with the demo provider (no LLM) against public `thelook_ecom
 | Bytes billed | 10,485,760 (BigQuery’s 10 MiB on-demand minimum) |
 | Job id | `62faf47c-6e8b-4493-8e85-efa3501d7e45` |
 
-`pytest` replays this count. It does not re-query BigQuery.
+Same month, cancelled orders only. Asked with `deepseek-flash` and thinking disabled. The model proposed the SQL. Python checked it, bound the dates, and BigQuery returned the count:
+
+| Field | Value |
+|---|---|
+| Question | cancelled-order count for January 2024? |
+| Metric | `cancelled_order_count` |
+| Filter | `LOWER(o.status) = 'cancelled'` |
+| Parameters | same January 2024 bounds as above |
+| Schema | `live` |
+| Answer | `cancelled_order_count: 212` |
+| Bytes processed | 3,296,426 |
+| Bytes billed | 10,485,760 |
+| Job id | `8e03c28d-b7d7-4353-978f-3e1daaf18182` |
+
+212 is the cancelled subset of the 1,409 orders. `pytest` replays both counts. It does not re-query BigQuery.
 
 ## Swap to your domain
 
@@ -86,7 +100,7 @@ Recorded 2026-10-14 with the demo provider (no LLM) against public `thelook_ecom
 ## Limitations (still a PoC)
 
 - Filter and join checks are structural. A join can pass without being the metric’s real keys
-- One live count is recorded (`order_count` for January 2024 = 1409). The suite does not re-run it against BigQuery
+- Two live counts are recorded for January 2024: 1409 orders and 212 cancelled orders. The suite replays them and does not re-run BigQuery
 - No audit log persistence yet
 - Not a production IAM boundary — use a dedicated read-only service account
 

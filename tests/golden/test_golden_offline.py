@@ -90,6 +90,41 @@ def test_january_2024_replays_recorded_count_without_bigquery():
     assert executor.last_params["end_date"] == case["expect_end"]
 
 
+def test_january_2024_cancelled_replays_recorded_count_without_bigquery():
+    case = next(item for item in CASES if item["id"] == "january_2024_cancelled")
+    ctx = DateContext(
+        timezone=case["timezone"],
+        today=date.fromisoformat(case["as_of"]),
+        now_iso="2026-10-14T12:00:00-07:00",
+    )
+    executor = _Executor({
+        "status": "succeeded",
+        "job_id": case["live_job_id"],
+        "sql": "",
+        "parameters": {},
+        "source_tables": ["bigquery-public-data.thelook_ecommerce.orders"],
+        "estimated_bytes_processed": case["live_bytes_processed"],
+        "bytes_processed": case["live_bytes_processed"],
+        "bytes_billed": case["live_bytes_billed"],
+        "cache_hit": False,
+        "rows": [{case["expect_metric"]: case["expect_order_count"]}],
+        "truncated": False,
+    })
+    assistant = AnalyticsAssistant(
+        _Settings(),
+        provider=DemoProvider(date_ctx=ctx),
+        executor=executor,
+        date_ctx=ctx,
+    )
+    result = assistant.ask(case["question"])
+    assert result["status"] == "succeeded"
+    assert result["metric_id"] == case["expect_metric"]
+    assert result["answer"] == f"{case['expect_metric']}: {case['expect_order_count']}"
+    assert result["date_context"]["time_range"] == case["expect_time_range"]
+    assert executor.last_params["start_date"] == case["expect_start"]
+    assert executor.last_params["end_date"] == case["expect_end"]
+
+
 def test_january_year_not_hardcoded():
     from app.llm import DemoProvider, _extract_month_kind
     assert _extract_month_kind("orders in january 2024") == "january_2024"

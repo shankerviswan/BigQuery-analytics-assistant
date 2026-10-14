@@ -23,6 +23,24 @@ cases:
       thelook orders. DemoProvider, no LLM. bytes_billed is BigQuery's
       10 MiB minimum. Offline tests replay this count and do not re-query.
 
+  - id: january_2024_cancelled
+    question: "cancelled-order count for January 2024?"
+    as_of: "2026-10-14"
+    expect_metric: cancelled_order_count
+    expect_order_count: 212
+    expect_time_range: january_2024
+    expect_start: "2024-01-01T00:00:00-08:00"
+    expect_end: "2024-02-01T00:00:00-08:00"
+    timezone: America/Los_Angeles
+    live_job_id: "8e03c28d-b7d7-4353-978f-3e1daaf18182"
+    live_bytes_processed: 3296426
+    live_bytes_billed: 10485760
+    notes: >
+      Verified 2026-10-14 with deepseek-flash (thinking disabled) on project
+      bigquery-assistance. SQL used LOWER(status) = 'cancelled' and the same
+      half-open January bounds. 212 is the cancelled subset of the 1409 orders.
+      Offline tests replay this count and do not re-query.
+
   - id: cte_bypass_users
     question: "(policy) CTE hide users table"
     must_reject_sql: |
