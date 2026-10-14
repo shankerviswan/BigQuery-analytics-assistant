@@ -8,6 +8,30 @@ Natural-language questions → validated SQL → BigQuery execution → answers 
 
 > The LLM proposes. Python validates. BigQuery executes. Actual results determine the answer.
 
+## How a question is answered
+
+The model does not browse the BigQuery project. Each question sends only what you configured.
+
+1. You list the allowed tables in `config/allowed_tables.yaml` and the approved metrics in `config/metrics.yaml`.
+2. Python loads the columns of those tables from BigQuery (`LIVE_SCHEMA=true`) and attaches the metric file and today's date.
+3. The model may propose SQL, a `metric_id`, and a time range such as `last_month` or `january_2024`. It may also ask for clarification.
+4. Python refuses the proposal if the metric, table, aggregate, filter, or date bounds do not match the metric file.
+5. Python fills in `@start_date` and `@end_date` from the trusted clock. The model does not choose those instants.
+6. Python dry-runs the SQL, then runs it only if it is read-only, uses an allow-listed table, and stays under `MAX_BYTES_BILLED`.
+7. The number in the answer is a cell BigQuery returned. The response also includes the SQL, the job id, and the bytes processed.
+
+With `LLM_*` empty, a few demo phrases are answered without a model. Any other question needs an OpenAI-compatible endpoint in `.env`.
+
+## Large project
+
+Do not register every raw table. Start from the questions people actually ask, about ten, and write one metric per question. Add a table to the allow-list only when a metric needs it.
+
+When a question would need several joins, create a BigQuery view that already applies those joins and filters. Allow-list the view and point the metric at it. The model then chooses the metric and the date range. The join stays in SQL you can test yourself.
+
+Columns are read live from the tables you listed. You do not type column lists into the YAML.
+
+Not built yet: a `joins` block that requires exact keys such as `product_id = id`, and an `AUDIT_LOG_PATH` that would append each answer to a file. A join note in the metric file is documentation only. The checker does not enforce it.
+
 ## PR1 fixes (vs earlier starter)
 
 | Fix | Detail |
@@ -84,10 +108,13 @@ Same month, cancelled orders only. Asked with `deepseek-flash` and thinking disa
 
 ## Swap to your domain
 
-1. Edit `config/allowed_tables.yaml` → your fully-qualified tables.
-2. Edit `config/metrics.yaml` → your approved metrics (`agg`, `column`, `filters`, `time_column`, `tables`).
+See **Large project** above. Do not copy the whole warehouse into these files.
+
+1. Edit `config/allowed_tables.yaml` → the few fully-qualified tables or views this assistant may read.
+2. Edit `config/metrics.yaml` → one approved metric per question (`agg`, `column`, `filters`, `time_column`, `tables`).
 3. Set `LIVE_SCHEMA=true` so the assistant loads real columns from INFORMATION_SCHEMA.
-4. Optionally replace DemoProvider patterns in `app/llm.py` for offline smoke tests on your domain.
+4. Set `BUSINESS_TIMEZONE` to the timezone those metrics use.
+5. Optionally replace DemoProvider patterns in `app/llm.py` for offline smoke tests on your domain.
 
 ## Cost safeguards
 
