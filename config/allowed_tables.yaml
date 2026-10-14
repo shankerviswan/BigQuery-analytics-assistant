@@ -1,0 +1,6 @@
+# Only these tables may be queried in the first PoC.
+# Dataset is public; query jobs still run in YOUR project.
+allowed_tables:
+  - bigquery-public-data.thelook_ecommerce.orders
+  - bigquery-public-data.thelook_ecommerce.order_items
+  - bigquery-public-data.thelook_ecommerce.products

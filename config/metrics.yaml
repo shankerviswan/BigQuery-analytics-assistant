@@ -1,0 +1,47 @@
+# These are explicit PoC definitions, not universal business definitions.
+# Review them against the dataset schema before treating results as business truth.
+metrics:
+  order_count:
+    description: Count of orders created during the requested period.
+    aliases: ["number of orders", "order volume", "orders"]
+    grain: one row per orders.id
+    time_column: orders.created_at
+    sql_rule: "COUNT(DISTINCT o.id)"
+    tables:
+      - bigquery-public-data.thelook_ecommerce.orders
+    caveats:
+      - "Counts all order statuses unless a status filter is explicitly requested."
+  cancelled_order_count:
+    description: Count of orders whose status is Cancelled, created during the requested period.
+    aliases: ["cancelled orders", "canceled orders", "cancellation count"]
+    grain: one row per orders.id
+    time_column: orders.created_at
+    sql_rule: "COUNT(DISTINCT o.id) WHERE LOWER(o.status) = 'cancelled'"
+    tables:
+      - bigquery-public-data.thelook_ecommerce.orders
+    caveats:
+      - "Status values should be verified against the live dataset before production use."
+  item_sales_value:
+    description: Sum of order-item sale_price for order items created during the requested period, excluding Cancelled and Returned items.
+    aliases: ["item sales value", "sales from order items"]
+    grain: one row per order_items.id
+    time_column: order_items.created_at
+    sql_rule: "SUM(oi.sale_price) with lower(status) not in ('cancelled', 'returned')"
+    tables:
+      - bigquery-public-data.thelook_ecommerce.order_items
+    caveats:
+      - "This is a PoC proxy, not an authoritative net-revenue definition."
+      - "It does not subtract refunds or account for accounting adjustments."
+      - "Ask the user to clarify when they say only 'sales' or 'revenue'."
+  category_item_sales:
+    description: Sum of eligible order-item sale_price grouped by product category.
+    aliases: ["sales by category", "category sales", "category revenue"]
+    grain: one row per product category, aggregating order_items.
+    time_column: order_items.created_at
+    sql_rule: "SUM(oi.sale_price) grouped by p.category; exclude Cancelled and Returned items"
+    tables:
+      - bigquery-public-data.thelook_ecommerce.order_items
+      - bigquery-public-data.thelook_ecommerce.products
+    caveats:
+      - "This is a PoC proxy, not an authoritative net-revenue definition."
+      - "The order_items to products join must use oi.product_id = p.id."

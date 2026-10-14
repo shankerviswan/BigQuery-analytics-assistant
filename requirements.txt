@@ -1,0 +1,6 @@
+google-cloud-bigquery>=3.25,<4
+sqlglot>=26,<29
+PyYAML>=6,<7
+python-dotenv>=1,<2
+openai>=1.50,<3
+pytest>=8,<9
