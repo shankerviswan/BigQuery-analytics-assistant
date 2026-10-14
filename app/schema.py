@@ -1,4 +1,8 @@
-"""Live schema introspection limited to the allow-listed tables."""
+"""Live schema introspection limited to the allow-listed tables.
+
+Domain-agnostic: whatever tables are in config/allowed_tables.yaml are loaded.
+STATIC_SCHEMA is a fallback for offline tests only (thelook sample).
+"""
 from __future__ import annotations
 
 
@@ -42,13 +46,19 @@ def fetch_schema_context(client, allowed_tables: set[str], location: str = "US")
     return "\n".join(lines)
 
 
+# Offline fallback for unit tests. Matches real thelook column names (order_id, not id).
+# Replace when pointing at a different domain — live INFORMATION_SCHEMA is preferred.
 STATIC_SCHEMA = (
     "bigquery-public-data.thelook_ecommerce.orders("
-    "id:INT64, user_id:INT64, status:STRING, created_at:TIMESTAMP, "
-    "shipped_at:TIMESTAMP, delivered_at:TIMESTAMP, returned_at:TIMESTAMP);\n"
+    "order_id:INT64, user_id:INT64, status:STRING, gender:STRING, "
+    "created_at:TIMESTAMP, returned_at:TIMESTAMP, shipped_at:TIMESTAMP, "
+    "delivered_at:TIMESTAMP, num_of_item:INT64);\n"
     "bigquery-public-data.thelook_ecommerce.order_items("
     "id:INT64, order_id:INT64, user_id:INT64, product_id:INT64, "
-    "status:STRING, created_at:TIMESTAMP, sale_price:FLOAT64);\n"
+    "inventory_item_id:INT64, status:STRING, created_at:TIMESTAMP, "
+    "shipped_at:TIMESTAMP, delivered_at:TIMESTAMP, returned_at:TIMESTAMP, "
+    "sale_price:FLOAT64);\n"
     "bigquery-public-data.thelook_ecommerce.products("
-    "id:INT64, category:STRING, name:STRING, brand:STRING, retail_price:FLOAT64, cost:FLOAT64)"
+    "id:INT64, cost:FLOAT64, category:STRING, name:STRING, brand:STRING, "
+    "retail_price:FLOAT64, department:STRING, sku:STRING, distribution_center_id:INT64)"
 )
