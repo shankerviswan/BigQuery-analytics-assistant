@@ -10,15 +10,15 @@ Natural-language questions → validated SQL → BigQuery execution → answers 
 
 ## How a question is answered
 
-The model does not browse the BigQuery project. Each question sends only what you configured.
+The model does not browse the BigQuery project. Each question sends every allow-listed schema and the whole metric file. The model sees that entire configured list.
 
 1. You list the allowed tables in `config/allowed_tables.yaml` and the approved metrics in `config/metrics.yaml`.
-2. Python loads the columns of those tables from BigQuery (`LIVE_SCHEMA=true`) and attaches the metric file and today's date.
-3. The model may propose SQL, a `metric_id`, and a time range such as `last_month` or `january_2024`. It may also ask for clarification.
-4. Python refuses the proposal if the metric, table, aggregate, filter, or date bounds do not match the metric file.
+2. Python loads the columns of those tables from BigQuery (`LIVE_SCHEMA=true`) and attaches the metric file and today's date. If some tables fail and at least one succeeds, the schema is still labeled `live`.
+3. The model writes the SQL. It also returns a `metric_id` and a time range such as `last_month` or `january_2024`. It may ask for clarification instead. It does not only choose a metric and a date range.
+4. Python refuses the proposal when the tables, aggregate, filter, or date bounds do not match the metric file. Those checks are structural. They do not prove the business formula or the exact join keys. A one-table or one-view metric cannot contain a `JOIN`. A multi-table metric only checks that some equijoin exists.
 5. Python fills in `@start_date` and `@end_date` from the trusted clock. The model does not choose those instants.
-6. Python dry-runs the SQL, then runs it only if it is read-only, uses an allow-listed table, and stays under `MAX_BYTES_BILLED`.
-7. The number in the answer is a cell BigQuery returned. The response also includes the SQL, the job id, and the bytes processed.
+6. Python checks its SQL policy, then dry-runs, then runs the query when it is read-only, uses an allow-listed table, and stays under `MAX_BYTES_BILLED`. That policy is not a BigQuery IAM boundary. A read-only identity is still separate.
+7. A single-cell answer is a value BigQuery returned only when the result is not truncated. A truncated result says the row cap cut it, and the reported length is not the full count. The response also includes the SQL, the job id, and the bytes processed.
 
 With `LLM_*` empty, a few demo phrases are answered without a model. Any other question needs an OpenAI-compatible endpoint in `.env`.
 
@@ -26,11 +26,11 @@ With `LLM_*` empty, a few demo phrases are answered without a model. Any other q
 
 Do not register every raw table. Start from the questions people actually ask, about ten, and write one metric per question. Add a table to the allow-list only when a metric needs it.
 
-When a question would need several joins, create a BigQuery view that already applies those joins and filters. Allow-list the view and point the metric at it. The model then chooses the metric and the date range. The join stays in SQL you can test yourself.
+When a question would need several joins, create a BigQuery view that already applies those joins and filters. Allow-list the view and point the metric at that one view. The model still writes the SQL. A one-table or one-view metric cannot add another `JOIN`.
 
-Columns are read live from the tables you listed. You do not type column lists into the YAML.
+Columns are read live from every table you listed. You do not type column lists into the YAML. Each question still sends the whole allow-list and the whole metric file.
 
-Not built yet: a `joins` block that requires exact keys such as `product_id = id`, and an `AUDIT_LOG_PATH` that would append each answer to a file. A join note in the metric file is documentation only. The checker does not enforce it.
+Not built yet: exact join keys such as `product_id = id`, and an `AUDIT_LOG_PATH` that would append each answer to a file. A join note in the metric file is documentation only. The checker does not enforce those keys. The SQL policy is not an IAM boundary.
 
 ## PR1 fixes (vs earlier starter)
 

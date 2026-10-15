@@ -108,6 +108,74 @@ def test_answer_uses_actual_result_value():
     assert executor.last_params["end_date"] == "2026-10-01T00:00:00+00:00"
 
 
+def test_truncated_single_cell_is_not_printed_as_the_answer():
+    executor = FakeExecutor({
+        "status": "succeeded",
+        "job_id": "test-job",
+        "sql": "SELECT 7 AS order_count",
+        "parameters": {},
+        "source_tables": ["bigquery-public-data.thelook_ecommerce.orders"],
+        "estimated_bytes_processed": 10,
+        "bytes_processed": 10,
+        "bytes_billed": 10,
+        "cache_hit": False,
+        "rows": [{"order_count": 7}],
+        "truncated": True,
+    })
+    provider = FakeProvider(SQLProposal(
+        sql=(
+            "SELECT COUNT(DISTINCT o.order_id) AS order_count "
+            "FROM `bigquery-public-data.thelook_ecommerce.orders` AS o "
+            "WHERE o.created_at >= @start_date AND o.created_at < @end_date"
+        ),
+        metric_id="order_count",
+        time_range="last_month",
+    ))
+    assistant = AnalyticsAssistant(
+        FakeSettings(), provider=provider, executor=executor, date_ctx=_date_ctx()
+    )
+    result = assistant.ask("How many orders?")
+    assert "order_count: 7" not in result["answer"]
+    assert "row cap" in result["answer"]
+    assert "not the full count" in result["answer"]
+
+
+def test_truncated_multi_row_says_the_length_is_not_the_full_count():
+    executor = FakeExecutor({
+        "status": "succeeded",
+        "job_id": "test-job",
+        "sql": "SELECT 1",
+        "parameters": {},
+        "source_tables": ["bigquery-public-data.thelook_ecommerce.order_items"],
+        "estimated_bytes_processed": 10,
+        "bytes_processed": 10,
+        "bytes_billed": 10,
+        "cache_hit": False,
+        "rows": [{"category": "a", "category_item_sales": 1}, {"category": "b", "category_item_sales": 2}],
+        "truncated": True,
+    })
+    provider = FakeProvider(SQLProposal(
+        sql=(
+            "SELECT p.category, SUM(oi.sale_price) AS category_item_sales "
+            "FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi "
+            "JOIN `bigquery-public-data.thelook_ecommerce.products` AS p "
+            "ON oi.product_id = p.id "
+            "WHERE LOWER(oi.status) NOT IN ('cancelled', 'returned') "
+            "AND oi.created_at >= @start_date AND oi.created_at < @end_date "
+            "GROUP BY p.category"
+        ),
+        metric_id="category_item_sales",
+        time_range="last_month",
+    ))
+    assistant = AnalyticsAssistant(
+        FakeSettings(), provider=provider, executor=executor, date_ctx=_date_ctx()
+    )
+    result = assistant.ask("Sales by category last month?")
+    assert "2 row(s)" in result["answer"]
+    assert "row cap" in result["answer"]
+    assert "not the full count" in result["answer"]
+
+
 def test_query_failure_is_not_replaced_with_a_number():
     provider = FakeProvider(SQLProposal(
         sql=(

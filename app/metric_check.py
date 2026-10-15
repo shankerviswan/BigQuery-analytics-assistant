@@ -1,6 +1,7 @@
 """Metric-to-SQL alignment using structured metric fields + sqlglot scopes."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import re
 
@@ -8,7 +9,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
 
-from app.sql_validator import extract_tables
+from app.sql_validator import extract_tables, normalize_table_name
 
 
 @dataclass
@@ -105,6 +106,8 @@ def _compared_column(node: exp.Expression | None, case_insensitive: bool) -> str
     if node is None:
         return None
     if isinstance(node, exp.Lower):
+        if not case_insensitive:
+            return None
         inner = _unwrap(node.this)
         if isinstance(inner, exp.Column):
             return inner.name.lower()
@@ -116,17 +119,15 @@ def _compared_column(node: exp.Expression | None, case_insensitive: bool) -> str
     return None
 
 
-def _literal_values(node: exp.Expression | None) -> set[str]:
-    vals: set[str] = set()
-    if node is None:
-        return vals
-    node = _unwrap(node)
-    if isinstance(node, exp.Literal):
-        vals.add(str(node.this).strip("'\"").lower())
-        return vals
-    for lit in node.find_all(exp.Literal):
-        vals.add(str(lit.this).strip("'\"").lower())
-    return vals
+def _string_literals(nodes) -> set[str] | None:
+    """Exact text of string literals. None if any item is not a plain string literal."""
+    out: set[str] = set()
+    for node in nodes:
+        node = _unwrap(node)
+        if not (isinstance(node, exp.Literal) and node.is_string):
+            return None
+        out.add(str(node.this))
+    return out
 
 
 def _has_param(node: exp.Expression | None, name: str) -> bool:
@@ -151,25 +152,29 @@ def _exact_agg_column(node: exp.Expression | None, column: str) -> bool:
 
 
 def _has_agg_on_column(scopes: list[Scope], agg: str, column: str) -> bool:
+    """The aggregate must be a selected expression, not math around it or a CTE-only aggregate."""
     col = column.lower()
     agg = agg.lower()
-    counts: list[exp.Count] = []
-    sums: list[exp.Sum] = []
     for scope in scopes:
         for expression in scope.expression.expressions or []:
-            counts.extend(expression.find_all(exp.Count))
-            sums.extend(expression.find_all(exp.Sum))
-
-    if agg == "count_distinct":
-        return any(_exact_agg_column(count.this, col) for count in counts)
-    if agg == "sum":
-        return any(_exact_agg_column(item.this, col) for item in sums)
-    if agg == "count":
-        return any(
-            _exact_agg_column(count.this, col)
-            for count in counts
-            if not isinstance(count.this, exp.Distinct)
-        )
+            node = _unwrap(expression.this if isinstance(expression, exp.Alias) else expression)
+            if agg == "count_distinct":
+                if (
+                    isinstance(node, exp.Count)
+                    and isinstance(node.this, exp.Distinct)
+                    and _exact_agg_column(node.this, col)
+                ):
+                    return True
+            elif agg == "sum":
+                if isinstance(node, exp.Sum) and _exact_agg_column(node.this, col):
+                    return True
+            elif agg == "count":
+                if (
+                    isinstance(node, exp.Count)
+                    and not isinstance(node.this, exp.Distinct)
+                    and _exact_agg_column(node.this, col)
+                ):
+                    return True
     return False
 
 
@@ -181,27 +186,31 @@ def _filter_ok(scopes: list[Scope], filt: dict) -> bool:
     if not col:
         return True
 
+    def want(item) -> str:
+        # LOWER(column) only matches an already-lowercase literal. Exact metrics keep the YAML text.
+        return str(item).lower() if case_insensitive else str(item)
+
     conjuncts = _conjuncts(scopes)
     if op == "eq":
-        target = str(value).lower()
+        target = want(value)
         for conj in conjuncts:
             conj = _unwrap(conj)
             if isinstance(conj, exp.EQ) and _compared_column(conj.left, case_insensitive) == col:
-                if target in _literal_values(conj.right):
+                if _string_literals([conj.right]) == {target}:
                     return True
         return False
 
     if op == "not_in":
-        required = {str(item).lower() for item in (value or [])}
+        required = {want(item) for item in (value or [])}
         excluded: set[str] = set()
         for conj in conjuncts:
             conj = _unwrap(conj)
             if isinstance(conj, exp.Not) and isinstance(_unwrap(conj.this), exp.In):
                 inner = _unwrap(conj.this)
                 if _compared_column(inner.this, case_insensitive) == col:
-                    excluded |= _literal_values(inner)
+                    excluded |= _string_literals(inner.expressions or []) or set()
             elif isinstance(conj, exp.NEQ) and _compared_column(conj.left, case_insensitive) == col:
-                excluded |= _literal_values(conj.right)
+                excluded |= _string_literals([conj.right]) or set()
         return required <= excluded
 
     return False
@@ -258,19 +267,30 @@ def _group_by_ok(scopes: list[Scope], group_by: list[str] | None) -> bool:
     return required <= found
 
 
-def _joins_ok(scopes: list[Scope], tables: list[str]) -> bool:
-    if len(tables) < 2:
-        return True
-    saw_equijoin = False
+def _repeats_physical_table(scopes: list[Scope]) -> bool:
+    counts: Counter[str] = Counter()
     for scope in scopes:
-        for join in scope.expression.args.get("joins") or []:
-            kind = str(join.args.get("kind") or "").upper()
-            on = join.args.get("on")
-            if kind == "CROSS" or on is None:
-                return False
-            for eq in on.find_all(exp.EQ):
-                if isinstance(_unwrap(eq.left), exp.Column) and isinstance(_unwrap(eq.right), exp.Column):
-                    saw_equijoin = True
+        for source in scope.sources.values():
+            if isinstance(source, exp.Table):
+                counts[normalize_table_name(source)] += 1
+    return any(count > 1 for count in counts.values())
+
+
+def _joins_ok(scopes: list[Scope], tables: list[str]) -> bool:
+    joins = [join for scope in scopes for join in (scope.expression.args.get("joins") or [])]
+    if _repeats_physical_table(scopes):
+        return False
+    if len(tables) < 2:
+        return not joins
+    saw_equijoin = False
+    for join in joins:
+        kind = str(join.args.get("kind") or "").upper()
+        on = join.args.get("on")
+        if kind == "CROSS" or on is None:
+            return False
+        for eq in on.find_all(exp.EQ):
+            if isinstance(_unwrap(eq.left), exp.Column) and isinstance(_unwrap(eq.right), exp.Column):
+                saw_equijoin = True
     return saw_equijoin
 
 
@@ -294,6 +314,12 @@ def check_metric_alignment(sql: str, metric: dict | None) -> MetricCheckResult:
             False,
             "SQL is missing required table(s) for metric: " + ", ".join(sorted(missing)),
         )
+    extra = sorted(present - set(required))
+    if extra:
+        return MetricCheckResult(
+            False,
+            "SQL reads table(s) outside the metric definition: " + ", ".join(extra),
+        )
 
     outputs = _output_scopes(tree)
     if not outputs:
@@ -304,7 +330,7 @@ def check_metric_alignment(sql: str, metric: dict | None) -> MetricCheckResult:
     time_col = metric.get("time_column")
     for output in outputs:
         scopes = _governing_scopes(output)
-        if column and agg and not _has_agg_on_column(scopes, agg, column):
+        if column and agg and not _has_agg_on_column([output], agg, column):
             return MetricCheckResult(
                 False,
                 f"Metric expects {agg}({column}), but SQL does not clearly express that aggregate.",
@@ -331,7 +357,8 @@ def check_metric_alignment(sql: str, metric: dict | None) -> MetricCheckResult:
         if not _joins_ok(scopes, required):
             return MetricCheckResult(
                 False,
-                "Metric reads multiple tables and requires an equijoin. CROSS JOIN is not allowed.",
+                "Joins are not allowed for a one-table metric; a multi-table metric needs an equijoin "
+                "and may not read the same table twice or use CROSS JOIN.",
             )
 
     return MetricCheckResult(True, "Metric alignment checks passed.")

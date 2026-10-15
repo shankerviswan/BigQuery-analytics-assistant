@@ -189,12 +189,18 @@ class AnalyticsAssistant:
 
     @staticmethod
     def _format_answer(result: dict) -> str:
-        if not result.get("rows"):
+        rows = result.get("rows") or []
+        if not rows:
             return "The query executed successfully but returned no rows."
-        if len(result["rows"]) == 1 and len(result["rows"][0]) == 1:
-            key, value = next(iter(result["rows"][0].items()))
+        if result.get("truncated"):
+            return (
+                f"Query returned {len(rows)} row(s), cut by the row cap. "
+                "That length is not the full count. Review the returned rows for the partial result."
+            )
+        if len(rows) == 1 and len(rows[0]) == 1:
+            key, value = next(iter(rows[0].items()))
             return f"{key}: {value}"
         return (
-            f"Query returned {len(result['rows'])} row(s). "
+            f"Query returned {len(rows)} row(s). "
             "Review the returned rows for the breakdown."
         )
